@@ -9,16 +9,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 import aiosqlite
 from openai import AsyncOpenAI
 
-# ================= НАСТРОЙКИ (ВСТАВЬ СВОИ ДАННЫЕ) =================
-TELEGRAM_TOKEN = (  # Токен от @BotFather
-    "ЗДЕСЬ_ВСТАВЬ_ТОКЕН_БОТА"
-)
-OPENAI_API_KEY = "ЗДЕСЬ_ВСТАВЬ_API_КЛЮЧ_OPENAI"
-ADMIN_ID = (  # Твой цифровой ID от @userinfobot
-    123456789
-)
+import os
+
+# ===== НАСТРОЙКИ ИЗ RENDER =====
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_FILE = "bot_memory.db"
-# ====================================================================
+# ===============================
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
