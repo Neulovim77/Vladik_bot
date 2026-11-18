@@ -13,12 +13,12 @@ from google import genai
 # ===== НАСТРОЙКИ ИЗ RENDER =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Считываем ключи через запятую (например: key1,key2,key3) или один ключ
+# Считываем пул ключей через запятую (переменная GEMINI_KEYS на Render)
 keys_env = os.getenv("GEMINI_KEYS", os.getenv("GEMINI_API_KEY", ""))
 API_KEYS = [k.strip() for k in keys_env.split(",") if k.strip()]
 
 if not API_KEYS:
-    raise ValueError("❌ Ошибка: Не найдены API-ключи Gemini в переменных окружения!")
+    raise ValueError("❌ Ошибка: Не найдены API-ключи Gemini в переменных окружения GEMINI_KEYS!")
 
 current_key_index = 0
 
@@ -27,7 +27,7 @@ def get_current_gemini_client():
     return genai.Client(api_key=API_KEYS[current_key_index])
 
 def rotate_key():
-    """Переключается на следующий ключ в пуле"""
+    """Переключается на следующий ключ в пуле при исчерпании лимита"""
     global current_key_index
     if len(API_KEYS) > 1:
         current_key_index = (current_key_index + 1) % len(API_KEYS)
@@ -71,7 +71,7 @@ async def init_db():
         await db.commit()
 
 async def check_and_update_limit(user_id: int):
-    """Проверяет лимит пользователя. Если это админ — всегда разрешает."""
+    """Проверяет персональный лимит пользователя. Администратору — безлимит."""
     if user_id == ADMIN_ID:
         return True, "∞ (Админ)"
 
@@ -119,7 +119,7 @@ async def check_and_update_limit(user_id: int):
             await db.commit()
             return True, DAILY_LIMIT - (requests_count + 1)
 
-# ===== ФИКТИВНЫЙ ВЕБ-СЕРВЕР ДЛЯ RENDER (HEALTH CHECK) =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER (HEALTH CHECK / UPTIMEROBOT) =====
 async def handle(request):
     return web.Response(text="Bot is alive")
 
@@ -154,7 +154,7 @@ async def handle_message(message: types.Message):
     
     user_id = message.from_user.id
     
-    # Проверяем персональный лимит (админ идет без ограничений)
+    # Проверяем персональный лимит
     allowed, data = await check_and_update_limit(user_id)
     
     if not allowed:
@@ -170,7 +170,7 @@ async def handle_message(message: types.Message):
     # Отправляем статус печати
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    # Пытаемся отправить запрос с автопереключением ключей при 429 ошибке
+    # Запрос к Gemini с автопереключением ключей при ошибке 429
     max_attempts = len(API_KEYS)
     success = False
     answer = ""
@@ -189,10 +189,9 @@ async def handle_message(message: types.Message):
         except Exception as e:
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                logging.warning(f"Ключ #{current_key_index + 1} исчерпал лимит. Пробуем следующий...")
+                logging.warning(f"Ключ #{current_key_index + 1} исчерпал лимит. Переключаем на следующий...")
                 rotate_key()
             else:
-                # Другие ошибки (не лимит) прерывают цикл
                 break
 
     if success:
@@ -229,7 +228,7 @@ async def main():
             await dp.start_polling(bot, handle_signals=False)
         except Exception as e:
             logging.error(f"Поллинг упал с ошибкой: {e}. Перезапуск через 5 секунд...")
-            asyncio.sleep(5)
+            await asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
