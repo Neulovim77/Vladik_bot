@@ -64,9 +64,9 @@ async def handle_message(message: types.Message):
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     try:
-        # Запрос к бесплатной модели Gemini
+        # Запрос к актуальной бесплатной модели Gemini
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=message.text,
         )
         answer = response.text
