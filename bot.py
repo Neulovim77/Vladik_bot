@@ -12,13 +12,32 @@ from google import genai
 
 # ===== НАСТРОЙКИ ИЗ RENDER =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Считываем ключи через запятую (например: key1,key2,key3) или один ключ
+keys_env = os.getenv("GEMINI_KEYS", os.getenv("GEMINI_API_KEY", ""))
+API_KEYS = [k.strip() for k in keys_env.split(",") if k.strip()]
+
+if not API_KEYS:
+    raise ValueError("❌ Ошибка: Не найдены API-ключи Gemini в переменных окружения!")
+
+current_key_index = 0
+
+def get_current_gemini_client():
+    """Возвращает клиент с текущим рабочим API-ключом"""
+    return genai.Client(api_key=API_KEYS[current_key_index])
+
+def rotate_key():
+    """Переключается на следующий ключ в пуле"""
+    global current_key_index
+    if len(API_KEYS) > 1:
+        current_key_index = (current_key_index + 1) % len(API_KEYS)
+        logging.warning(f"🔄 Переключение на запасной API-ключ #{current_key_index + 1}")
 
 # Впиши сюда свой Telegram ID цифрами (чтобы у тебя был безлимит)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) 
 
 # Ссылка на твой Telegram для связи с разработчиком
-DEV_CONTACT = "@Ronisupport" # Можешь поменять на свой юзернейм, если нужно
+DEV_CONTACT = "@Ronisupport"
 
 DB_FILE = "bot_memory.db"
 
@@ -28,9 +47,6 @@ DAILY_LIMIT = 20
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
-
-# Инициализация клиента Google GenAI
-gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Брендовая подпись с призывом написать разработчику
 BRAND_FOOTER = (
@@ -154,15 +170,32 @@ async def handle_message(message: types.Message):
     # Отправляем статус печати
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
-    try:
-        # Запрос к модели Gemini
-        response = gemini_client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=message.text,
-        )
-        answer = response.text
-        
-        # Экранируем спецсимволы под HTML
+    # Пытаемся отправить запрос с автопереключением ключей при 429 ошибке
+    max_attempts = len(API_KEYS)
+    success = False
+    answer = ""
+    error_str = ""
+
+    for attempt in range(max_attempts):
+        try:
+            client = get_current_gemini_client()
+            response = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=message.text,
+            )
+            answer = response.text
+            success = True
+            break
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                logging.warning(f"Ключ #{current_key_index + 1} исчерпал лимит. Пробуем следующий...")
+                rotate_key()
+            else:
+                # Другие ошибки (не лимит) прерывают цикл
+                break
+
+    if success:
         safe_answer = html.escape(answer)
         
         if user_id == ADMIN_ID:
@@ -171,13 +204,9 @@ async def handle_message(message: types.Message):
             footer_info = f"\n\n💬 <i>Осталось попыток на сегодня: {data} из {DAILY_LIMIT}</i>"
             
         final_text = safe_answer + footer_info + BRAND_FOOTER
-        
         await message.answer(final_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        
-    except Exception as e:
-        error_str = str(e)
+    else:
         logging.error(f"Ошибка Gemini для юзера {user_id}: {error_str}")
-        
         await message.answer(
             f"Произошла ошибка при обращении к ИИ: <code>{html.escape(error_str)}</code>"
             f"\n\n<i>Если ошибка повторяется, сообщи разработчику: {DEV_CONTACT}</i>{BRAND_FOOTER}",
@@ -190,7 +219,7 @@ async def main():
     await start_web_server()
     
     logging.basicConfig(level=logging.INFO)
-    print("Бот Vortex запущен: персональные лимиты и контакты разработчика активны!")
+    print(f"Бот Vortex запущен! Загружено API-ключей в пул: {len(API_KEYS)}")
     
     await bot.delete_webhook(drop_pending_updates=True)
     
@@ -200,7 +229,7 @@ async def main():
             await dp.start_polling(bot, handle_signals=False)
         except Exception as e:
             logging.error(f"Поллинг упал с ошибкой: {e}. Перезапуск через 5 секунд...")
-            await asyncio.sleep(5)
+            asyncio.sleep(5)
 
 if __name__ == "__main__":
     asyncio.run(main())
