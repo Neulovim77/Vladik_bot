@@ -2,31 +2,31 @@ import os
 import asyncio
 import logging
 import html
-import json
 from aiohttp import web
-from aiogram import Bot, Dispatcher, F, types
-from aiogram.enums import ChatType, ParseMode
+from aiogram import Bot, Dispatcher, types
+from aiogram.enums import ParseMode
 from aiogram.filters import Command
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 import aiosqlite
-from openai import AsyncOpenAI
+from google import genai
 
 # ===== НАСТРОЙКИ ИЗ RENDER =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_FILE = "bot_memory.db"
 # ===============================
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
-openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+# Инициализация клиента Google GenAI
+gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Брендовая подпись
 BRAND_FOOTER = (
     "\n\n"
     "────────────────────────\n"
-    "🤖 <b>Создано с помощью ИИ</b>\n"
+    "🤖 <b>Создано с помощью ИИ (Gemini)</b>\n"
     '🔗 <a href="https://t.me/Ronisupport">@Ronisupport</a> | '
     '🌐 <a href="https://www.tiktok.com/@dez1x_">TikTok</a>'
 )
@@ -49,8 +49,8 @@ async def start_web_server():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        f"Привет, {message.from_user.first_name}! Я твой ИИ-помощник.\n"
-        f"Напиши мне любой вопрос, и я отвечу с помощью OpenAI!{BRAND_FOOTER}",
+        f"Привет, {message.from_user.first_name}! Я твой бесплатный ИИ-помощник на базе Gemini.\n"
+        f"Напиши мне любой вопрос, и я отвечу!{BRAND_FOOTER}",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
@@ -64,14 +64,12 @@ async def handle_message(message: types.Message):
     await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Ты полезный, дружелюбный ИИ-помощник в Telegram."},
-                {"role": "user", "content": message.text}
-            ]
+        # Запрос к бесплатной модели Gemini
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=message.text,
         )
-        answer = response.choices[0].message.content
+        answer = response.text
         
         # Экранируем спецсимволы под HTML
         safe_answer = html.escape(answer)
@@ -79,7 +77,7 @@ async def handle_message(message: types.Message):
         
         await message.answer(final_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     except Exception as e:
-        logging.error(f"Ошибка OpenAI: {e}")
+        logging.error(f"Ошибка Gemini: {e}")
         await message.answer(f"Произошла ошибка при обращении к ИИ: {e}")
 
 async def main():
@@ -88,6 +86,10 @@ async def main():
     
     logging.basicConfig(level=logging.INFO)
     print("Бот успешно запущен и ожидает сообщения!")
+    
+    # Сбрасываем зависшие старые апдейты на стороне Telegram
+    await bot.delete_webhook(drop_pending_updates=True)
+    
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
