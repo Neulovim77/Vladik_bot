@@ -13,7 +13,6 @@ from google import genai
 # ===== НАСТРОЙКИ ИЗ RENDER =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
-# Считываем пул ключей через запятую (переменная GEMINI_KEYS на Render)
 keys_env = os.getenv("GEMINI_KEYS", os.getenv("GEMINI_API_KEY", ""))
 API_KEYS = [k.strip() for k in keys_env.split(",") if k.strip()]
 
@@ -23,39 +22,28 @@ if not API_KEYS:
 current_key_index = 0
 
 def get_current_gemini_client():
-    """Возвращает клиент с текущим рабочим API-ключом"""
     return genai.Client(api_key=API_KEYS[current_key_index])
 
 def rotate_key():
-    """Переключается на следующий ключ в пуле при исчерпании лимита"""
     global current_key_index
     if len(API_KEYS) > 1:
         current_key_index = (current_key_index + 1) % len(API_KEYS)
         logging.warning(f"🔄 Переключение на запасной API-ключ #{current_key_index + 1}")
 
-# Список моделей для каскадного переключения при ошибках квот
 FALLBACK_MODELS = [
     "gemini-2.5-flash",
     "gemini-1.5-flash",
     "gemini-3.8-flash"
 ]
 
-# Впиши сюда свой Telegram ID цифрами (чтобы у тебя был безлимит)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) 
-
-# Ссылка на твой Telegram для связи с разработчиком
 DEV_CONTACT = "@Ronisupport"
-
 DB_FILE = "bot_memory.db"
-
-# Индивидуальный лимит запросов на обычного пользователя в сутки
 DAILY_LIMIT = 20
-# ===============================
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
-# Брендовая подпись с призывом написать разработчику
 BRAND_FOOTER = (
     "\n\n"
     "────────────────────────\n"
@@ -65,7 +53,6 @@ BRAND_FOOTER = (
     '🌐 <a href="https://www.tiktok.com/@dez1x_">TikTok</a>'
 )
 
-# ===== ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ ДЛЯ ЛИМИТОВ =====
 async def init_db():
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
@@ -78,7 +65,6 @@ async def init_db():
         await db.commit()
 
 async def check_and_update_limit(user_id: int):
-    """Проверяет персональный лимит пользователя. Администратору — безлимит."""
     if user_id == ADMIN_ID:
         return True, "∞ (Админ)"
 
@@ -100,7 +86,6 @@ async def check_and_update_limit(user_id: int):
             requests_count, reset_time_str = row
             reset_time = datetime.fromisoformat(reset_time_str)
             
-            # Если прошли сутки — сбрасываем лимит
             if now >= reset_time:
                 new_reset_time = (now + timedelta(days=1)).isoformat()
                 await db.execute(
@@ -110,15 +95,12 @@ async def check_and_update_limit(user_id: int):
                 await db.commit()
                 return True, DAILY_LIMIT - 1
             
-            # Если лимит исчерпан
             if requests_count >= DAILY_LIMIT:
                 diff = reset_time - now
                 hours = int(diff.total_seconds() // 3600)
                 minutes = int((diff.total_seconds() % 3600) // 60)
-                time_str = f"{hours}ч {minutes}м"
-                return False, time_str
+                return False, f"{hours}ч {minutes}м"
             
-            # Увеличиваем счетчик
             await db.execute(
                 "UPDATE user_limits SET requests_count = requests_count + 1 WHERE user_id = ?",
                 (user_id,)
@@ -126,7 +108,7 @@ async def check_and_update_limit(user_id: int):
             await db.commit()
             return True, DAILY_LIMIT - (requests_count + 1)
 
-# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER (HEALTH CHECK / UPTIMEROBOT) =====
+# ===== ВЕБ-СЕРВЕР ДЛЯ RENDER =====
 async def handle(request):
     return web.Response(text="Bot is alive")
 
@@ -138,8 +120,8 @@ async def start_web_server():
     port = int(os.getenv("PORT", 8080))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"Web server started on port {port}")
-# ==========================================================
+    print(f"Web server started and listening on port {port}")
+# ==================================
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -158,3 +140,78 @@ async def cmd_start(message: types.Message):
 async def handle_message(message: types.Message):
     if not message.text:
         return
+    
+    user_id = message.from_user.id
+    allowed, data = await check_and_update_limit(user_id)
+    
+    if not allowed:
+        warning_text = (
+            "⚠️ <b>Твой лимит запросов на сегодня исчерпан!</b>\n\n"
+            f"Каждому пользователю доступно <code>{DAILY_LIMIT}</code> запросов в сутки.\n"
+            f"⏱ <b>Лимит обновится через:</b> <code>{data}</code>\n\n"
+            f"Подожди указанное время или обратись к разработчику: {DEV_CONTACT}.{BRAND_FOOTER}"
+        )
+        await message.answer(warning_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        return
+    
+    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
+    
+    success = False
+    answer = ""
+    error_str = ""
+
+    for model_name in FALLBACK_MODELS:
+        if success:
+            break
+        for attempt in range(len(API_KEYS)):
+            try:
+                client = get_current_gemini_client()
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=message.text,
+                )
+                answer = response.text
+                success = True
+                break
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    logging.warning(f"Ключ #{current_key_index + 1} исчерпал лимит на модели {model_name}. Ротация...")
+                    rotate_key()
+                else:
+                    break
+
+    if success:
+        safe_answer = html.escape(answer)
+        footer_info = "\n\n💬 <i>Осталось попыток: ∞ [Администратор]</i>" if user_id == ADMIN_ID else f"\n\n💬 <i>Осталось попыток на сегодня: {data} из {DAILY_LIMIT}</i>"
+        await message.answer(safe_answer + footer_info + BRAND_FOOTER, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    else:
+        logging.error(f"Все ключи и модели исчерпали квоту для юзера {user_id}: {error_str}")
+        await message.answer(
+            f"⚠️ <b>Внимание:</b> Все серверные ключи временно исчерпали суточный лимит бесплатных запросов Google AI.\n\n"
+            f"<i>Пожалуйста, подождите немного или сообщите разработчику: {DEV_CONTACT}</i>{BRAND_FOOTER}",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+
+async def main():
+    logging.basicConfig(level=logging.INFO)
+    await init_db()
+    
+    # Сначала поднимаем веб-сервер, чтобы Render сразу зафиксировал открытый порт
+    await start_web_server()
+    
+    print(f"Бот Vortex запущен с каскадным переключением! Загружено ключей: {len(API_KEYS)}")
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Запускаем поллинг в бесконечном цикле
+    while True:
+        try:
+            print("Запуск polling...")
+            await dp.start_polling(bot, handle_signals=False)
+        except Exception as e:
+            logging.error(f"Поллинг упал с ошибкой: {e}. Перезапуск через 5 секунд...")
+            await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    asyncio.run(main())
