@@ -33,6 +33,13 @@ def rotate_key():
         current_key_index = (current_key_index + 1) % len(API_KEYS)
         logging.warning(f"🔄 Переключение на запасной API-ключ #{current_key_index + 1}")
 
+# Список моделей для каскадного переключения при ошибках квот
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-1.5-flash",
+    "gemini-3.8-flash"
+]
+
 # Впиши сюда свой Telegram ID цифрами (чтобы у тебя был безлимит)
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789")) 
 
@@ -151,84 +158,3 @@ async def cmd_start(message: types.Message):
 async def handle_message(message: types.Message):
     if not message.text:
         return
-    
-    user_id = message.from_user.id
-    
-    # Проверяем персональный лимит
-    allowed, data = await check_and_update_limit(user_id)
-    
-    if not allowed:
-        warning_text = (
-            "⚠️ <b>Твой лимит запросов на сегодня исчерпан!</b>\n\n"
-            f"Каждому пользователю доступно <code>{DAILY_LIMIT}</code> запросов в сутки.\n"
-            f"⏱ <b>Лимит обновится через:</b> <code>{data}</code>\n\n"
-            f"Подожди указанное время или обратись к разработчику: {DEV_CONTACT}.{BRAND_FOOTER}"
-        )
-        await message.answer(warning_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        return
-    
-    # Отправляем статус печати
-    await message.bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
-    # Запрос к Gemini с автопереключением ключей при ошибке 429
-    max_attempts = len(API_KEYS)
-    success = False
-    answer = ""
-    error_str = ""
-
-    for attempt in range(max_attempts):
-        try:
-            client = get_current_gemini_client()
-            response = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=message.text,
-            )
-            answer = response.text
-            success = True
-            break
-        except Exception as e:
-            error_str = str(e)
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                logging.warning(f"Ключ #{current_key_index + 1} исчерпал лимит. Переключаем на следующий...")
-                rotate_key()
-            else:
-                break
-
-    if success:
-        safe_answer = html.escape(answer)
-        
-        if user_id == ADMIN_ID:
-            footer_info = "\n\n💬 <i>Осталось попыток: ∞ [Администратор]</i>"
-        else:
-            footer_info = f"\n\n💬 <i>Осталось попыток на сегодня: {data} из {DAILY_LIMIT}</i>"
-            
-        final_text = safe_answer + footer_info + BRAND_FOOTER
-        await message.answer(final_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-    else:
-        logging.error(f"Ошибка Gemini для юзера {user_id}: {error_str}")
-        await message.answer(
-            f"Произошла ошибка при обращении к ИИ: <code>{html.escape(error_str)}</code>"
-            f"\n\n<i>Если ошибка повторяется, сообщи разработчику: {DEV_CONTACT}</i>{BRAND_FOOTER}",
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True
-        )
-
-async def main():
-    await init_db()
-    await start_web_server()
-    
-    logging.basicConfig(level=logging.INFO)
-    print(f"Бот Vortex запущен! Загружено API-ключей в пул: {len(API_KEYS)}")
-    
-    await bot.delete_webhook(drop_pending_updates=True)
-    
-    while True:
-        try:
-            print("Запуск polling...")
-            await dp.start_polling(bot, handle_signals=False)
-        except Exception as e:
-            logging.error(f"Поллинг упал с ошибкой: {e}. Перезапуск через 5 секунд...")
-            await asyncio.sleep(5)
-
-if __name__ == "__main__":
-    asyncio.run(main())
